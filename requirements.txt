@@ -1,0 +1,2 @@
+# Only the collector needs this; demo.py and dashboard.py are stdlib-only.
+pysnmp>=7.1

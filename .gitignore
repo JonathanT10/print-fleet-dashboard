@@ -1,0 +1,5 @@
+# Local data and generated output
+*.db
+fleet.html
+config.ini
+__pycache__/
