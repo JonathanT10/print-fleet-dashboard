@@ -12,6 +12,7 @@ Config (INI):
     community = public
     timeout = 2
     retries = 1
+    ; version = 1        <- Canon iR-ADV fleets: they answer SNMPv1 only
 
     [devices]
     Front Office = 10.0.10.21
@@ -64,7 +65,8 @@ SUPPLY_TYPES = {3: "toner", 4: "waste-toner", 5: "ink", 6: "ink-cartridge",
 # SNMP (pysnmp >= 7, asyncio hlapi)
 # --------------------------------------------------------------------------- #
 
-async def snmp_poll(host: str, port: int, community: str, timeout: float, retries: int):
+async def snmp_poll(host: str, port: int, community: str, timeout: float, retries: int,
+                    mp_model: int = 1):
     """Return (fields dict, supplies list). Raises on unreachable/timeout."""
     from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
@@ -72,7 +74,7 @@ async def snmp_poll(host: str, port: int, community: str, timeout: float, retrie
     )
 
     engine = SnmpEngine()
-    auth = CommunityData(community, mpModel=1)  # SNMP v2c
+    auth = CommunityData(community, mpModel=mp_model)  # 0 = SNMPv1, 1 = SNMPv2c
     transport = await UdpTransportTarget.create((host, port),
                                                 timeout=timeout, retries=retries)
     try:
@@ -174,11 +176,11 @@ def normalize(fields, supplies):
     return worst, detail, uptime_s, pages, model, serial, name
 
 
-def poll_device(display_name, address, community, timeout, retries):
+def poll_device(display_name, address, community, timeout, retries, mp_model=1):
     host, _, port = address.partition(":")
     fields, supplies = asyncio.run(
         snmp_poll(host.strip(), int(port) if port else 161,
-                  community, timeout, retries))
+                  community, timeout, retries, mp_model))
     return normalize(fields, supplies), supplies
 
 
@@ -195,6 +197,10 @@ def main():
     community = cfg.get("snmp", "community", fallback="public")
     timeout = cfg.getfloat("snmp", "timeout", fallback=2.0)
     retries = cfg.getint("snmp", "retries", fallback=1)
+    # Canon iR-ADV devices commonly answer SNMPv1 ONLY and silently ignore
+    # v2c - set "version = 1" in [snmp] for those fleets. Default: 2c.
+    version = cfg.get("snmp", "version", fallback="2c").strip().lower()
+    mp_model = 0 if version in ("1", "v1") else 1
     devices = dict(cfg.items("devices")) if cfg.has_section("devices") else {}
     if not devices:
         sys.exit("No [devices] configured.")
@@ -207,7 +213,7 @@ def main():
         ip = address.strip()
         try:
             (status, detail, uptime_s, pages, model, serial, sysname), supplies = \
-                poll_device(name, ip, community, timeout, retries)
+                poll_device(name, ip, community, timeout, retries, mp_model)
             device_id = fleetdb.upsert_device(conn, ip, name=name or sysname,
                                               model=model, serial=serial, ts=ts)
             fleetdb.insert_snapshot(conn, device_id, ts, True, status, detail,

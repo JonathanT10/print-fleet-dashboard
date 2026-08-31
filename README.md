@@ -34,6 +34,14 @@ python collector.py                  # one snapshot per device per run
 python dashboard.py                  # regenerate fleet.html
 ```
 
+If every device times out, check the SNMP version before anything else — Canon iR-ADV fleets commonly answer **SNMPv1 only**:
+
+```ini
+[snmp]
+community = public
+version = 1
+```
+
 Schedule both (cron, Task Scheduler) — e.g. collector hourly, dashboard right after:
 
 ```
@@ -57,8 +65,9 @@ Status rolls up to four states: **OK**, **Warning** (low paper/toner, or any sup
 
 ## Honesty notes
 
-- Tested against **simulated devices** (snmpsim serving Printer-MIB recordings) and synthetic data; it has not yet run against a wall of physical hardware. The Printer MIB is well standardized, but vendors have quirks — if your device reports supplies in `-2`/`-3` (unknown / "some remaining"), the dashboard shows a dash rather than guessing.
-- SNMP v2c with a community string is the v1 scope — fine on a management VLAN, not something to expose broadly. SNMPv3 support is on the roadmap.
+- Tested against **real hardware** (a Canon iR-ADV fleet: models, serials, lifetime page counts, per-cartridge toner all verified against the devices' own web panels) as well as simulated devices and synthetic data. The Printer MIB is well standardized, but vendors have quirks — if your device reports supplies in `-2`/`-3` (unknown / "some remaining"), the dashboard shows a dash rather than guessing. Canon reports drum and waste-toner units that way, for example.
+- **Toner percentages are exact.** Device web panels typically round up to the nearest 10%; this reads the raw MIB values, so 41% here shows as "50%" on the panel. Neither is wrong — this one is just finer-grained.
+- **SNMPv1 and v2c** are both supported (`version = 1` in `[snmp]` for the many Canon iR-ADV devices that answer v1 only and silently ignore v2c). A community string is the whole auth story either way — fine on a management VLAN, not something to expose broadly. SNMPv3 is on the roadmap.
 - Read-only by design: the collector only ever issues SNMP GET/WALK.
 
 ## Roadmap
