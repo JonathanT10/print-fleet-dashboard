@@ -176,11 +176,22 @@ def normalize(fields, supplies):
     return worst, detail, uptime_s, pages, model, serial, name
 
 
-def poll_device(display_name, address, community, timeout, retries, mp_model=1):
+def poll_device(display_name, address, community, timeout, retries, mp_model=1,
+                deadline=20.0):
     host, _, port = address.partition(":")
-    fields, supplies = asyncio.run(
-        snmp_poll(host.strip(), int(port) if port else 161,
-                  community, timeout, retries, mp_model))
+
+    async def _run():
+        # Hard wall-clock ceiling on the ENTIRE device exchange. The per-request
+        # timeout/retries bound each SNMP call, but a flaky device that answers
+        # some calls and stalls on others (or wedges a supply walk) could still
+        # drag the poll out or hang it. This guarantees the collector moves on,
+        # so one unresponsive printer can never freeze the whole refresh.
+        return await asyncio.wait_for(
+            snmp_poll(host.strip(), int(port) if port else 161,
+                      community, timeout, retries, mp_model),
+            timeout=deadline)
+
+    fields, supplies = asyncio.run(_run())
     return normalize(fields, supplies), supplies
 
 
@@ -201,6 +212,11 @@ def main():
     # v2c - set "version = 1" in [snmp] for those fleets. Default: 2c.
     version = cfg.get("snmp", "version", fallback="2c").strip().lower()
     mp_model = 0 if version in ("1", "v1") else 1
+    # Hard per-device ceiling so one unresponsive printer can never wedge the
+    # whole poll. Defaults to comfortably longer than a healthy poll, scaled off
+    # the per-request timeout; override with "device_timeout = <seconds>".
+    device_timeout = cfg.getfloat("snmp", "device_timeout",
+                                  fallback=max(10.0, timeout * (retries + 1) * 4 + 4))
     devices = dict(cfg.items("devices")) if cfg.has_section("devices") else {}
     if not devices:
         sys.exit("No [devices] configured.")
@@ -213,7 +229,8 @@ def main():
         ip = address.strip()
         try:
             (status, detail, uptime_s, pages, model, serial, sysname), supplies = \
-                poll_device(name, ip, community, timeout, retries, mp_model)
+                poll_device(name, ip, community, timeout, retries, mp_model,
+                            device_timeout)
             device_id = fleetdb.upsert_device(conn, ip, name=name or sysname,
                                               model=model, serial=serial, ts=ts)
             fleetdb.insert_snapshot(conn, device_id, ts, True, status, detail,
@@ -229,10 +246,12 @@ def main():
                     "INSERT INTO devices (ip, name, first_seen, last_seen)"
                     " VALUES (?, ?, ?, ?)", (ip, name, ts, ts))
                 device_id = cur.lastrowid
+            detail = (f"No SNMP response (timed out after {device_timeout:g}s)"
+                      if isinstance(e, (asyncio.TimeoutError, TimeoutError))
+                      else f"No SNMP response ({type(e).__name__})")
             fleetdb.insert_snapshot(conn, device_id, ts, False, "offline",
-                                    f"No SNMP response ({type(e).__name__})",
-                                    None, None)
-            print(f"[!] {name} ({ip}): unreachable ({e})")
+                                    detail, None, None)
+            print(f"[!] {name} ({ip}): unreachable ({e or type(e).__name__})")
             fail += 1
         conn.commit()  # keep what we have even if a later device blows up
 
