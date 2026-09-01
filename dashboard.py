@@ -136,7 +136,9 @@ def collect(conn):
 # --------------------------------------------------------------------------- #
 
 def render(data: dict) -> str:
-    payload = json.dumps(data)
+    # Neutralize any "</script>" inside string values so a hostile printer
+    # name/description cannot close the script block and inject markup.
+    payload = json.dumps(data).replace("</", "<\\/")
     return HTML_TEMPLATE.replace("__PAYLOAD__", payload)
 
 
@@ -303,6 +305,11 @@ const compact = n => n == null ? "&mdash;"
   : n >= 1e4 ? Math.round(n / 1e3) + "K"
   : n.toLocaleString("en-US");
 
+// Printer name/model/description come straight from SNMP - untrusted text.
+// Escape it before it goes anywhere near innerHTML.
+const esc = s => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
 const STATUS = {
   ok:      { color: "var(--good)",     label: "OK",      icon: "check" },
   warning: { color: "var(--warning)",  label: "Warning", icon: "alert" },
@@ -345,9 +352,9 @@ if (DATA.attention.length) {
   document.getElementById("attnPanel").hidden = false;
   document.getElementById("attn").innerHTML = DATA.attention.map(a => `
     <div class="attn-row">${badge(a.status)}
-      <span class="who">${a.name}</span>
-      <span class="what">${a.detail || ""}</span>
-      <span class="ip">${a.ip}</span></div>`).join("");
+      <span class="who">${esc(a.name)}</span>
+      <span class="what">${esc(a.detail || "")}</span>
+      <span class="ip">${esc(a.ip)}</span></div>`).join("");
 }
 
 /* ---- Trend chart: single series line + 10% area wash, hover crosshair ---- */
@@ -429,8 +436,8 @@ function meter(s) {
   const fill = s.pct < 10 ? "var(--critical)" : s.pct < 20 ? "var(--warning)" : "var(--accent)";
   const track = `color-mix(in oklab, ${fill} 18%, var(--surface))`;
   const short = s.desc.replace(/ Toner$/i, "").slice(0, 1);
-  return `<div class="meter" title="${s.desc}: ${s.pct}%">
-    <span class="mlabel">${short}</span>
+  return `<div class="meter" title="${esc(s.desc)}: ${s.pct}%">
+    <span class="mlabel">${esc(short)}</span>
     <div class="track" style="background:${track}"><div class="fill" style="width:${s.pct}%;background:${fill}"></div></div>
     <span class="mpct">${s.pct}%</span></div>`;
 }
@@ -455,8 +462,8 @@ function ago(ts) {
 }
 document.getElementById("rows").innerHTML = DATA.devices.map(d => `
   <tr>
-    <td class="name"><div class="nm">${d.name}</div><div class="mdl">${d.model} ${"\u00B7"} ${d.ip}</div></td>
-    <td>${badge(d.status)}${d.status !== "ok" && d.detail ? `<div class="mdl" style="margin-top:2px">${d.detail}</div>` : ""}</td>
+    <td class="name"><div class="nm">${esc(d.name)}</div><div class="mdl">${esc(d.model)} ${"\u00B7"} ${esc(d.ip)}</div></td>
+    <td>${badge(d.status)}${d.status !== "ok" && d.detail ? `<div class="mdl" style="margin-top:2px">${esc(d.detail)}</div>` : ""}</td>
     <td><div class="meters">${d.supplies.map(meter).join("") || '<span style="color:var(--muted);font-size:12px">&mdash;</span>'}</div></td>
     <td class="pages">${fmt(d.pages)}</td>
     <td class="spark">${sparkline(d.spark)}</td>

@@ -69,6 +69,7 @@ Status rolls up to four states: **OK**, **Warning** (low paper/toner, or any sup
 - **Toner percentages are exact.** Device web panels typically round up to the nearest 10%; this reads the raw MIB values, so 41% here shows as "50%" on the panel. Neither is wrong — this one is just finer-grained.
 - **SNMPv1 and v2c** are both supported (`version = 1` in `[snmp]` for the many Canon iR-ADV devices that answer v1 only and silently ignore v2c). A community string is the whole auth story either way — fine on a management VLAN, not something to expose broadly. SNMPv3 is on the roadmap.
 - Read-only by design: the collector only ever issues SNMP GET/WALK.
+- **Printer-supplied text is treated as data, never markup.** A device sets its own name and description, so the dashboard escapes every SNMP-sourced value before it reaches the page — a printer named `<script>…` renders as that literal text, it does not run. `tests/test_xss.py` executes a deliberately hostile fleet in a browser and asserts nothing injected fires.
 
 ## Roadmap
 
