@@ -7,7 +7,6 @@ again, and that polling a big fleet is not one-device-after-another.
 """
 
 import asyncio
-import configparser
 import json
 import os
 import sys
