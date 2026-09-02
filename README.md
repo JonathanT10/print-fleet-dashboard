@@ -50,6 +50,52 @@ Schedule both (cron, Task Scheduler) — e.g. collector hourly, dashboard right 
 
 Prefer a live page? `python dashboard.py --serve 8080` serves a dashboard that regenerates on every refresh.
 
+## Finding printers you have not listed
+
+Typing every address gets old once you have more than a floor of them. Name a
+place to look instead, and anything in it that answers the Printer MIB is added
+and polled from then on:
+
+```ini
+[ranges]
+Office     = 10.0.10.0/24              a whole subnet
+Warehouse  = 10.0.20.50-10.0.20.99     a span
+Spares     = 10.0.20.50-99             the same span, short form
+Boardroom  = 10.0.30.15                just the one
+
+[discovery]
+rescan_hours = 24        ; 0 = only when you pass --discover
+ignore = 10.0.10.99      ; found, but leave it alone
+```
+
+Found devices are named from their `sysName` (falling back to model, then the
+address), remembered with the place they came from, and polled like any other.
+A switch or a server that merely speaks SNMP is passed over, not recorded — an
+address only counts if it answers `hrPrinterStatus` or `prtMarkerLifeCount`.
+
+```bash
+python collector.py --discover      # look now, whatever the clock says
+python collector.py --no-discover   # poll what is known, look for nothing
+```
+
+**This is a scan, and it says so.** With `[ranges]` set, the collector sends an
+SNMP GET to every address in them — one cheap GET, 64 at a time, one second to
+answer. That is ordinary traffic on a network you run, but it is still a scan
+and on some networks it will show up in monitoring; point it at your own VLANs
+and tell whoever watches them. Nothing is scanned unless you name a place. A
+place larger than 1024 addresses is **refused rather than attempted** (`10.0.0.0/8`
+is sixteen million), and a place that cannot be parsed is reported by name
+rather than quietly doing nothing — a typo you cannot see is worse than an
+error you can. A place that has never been looked at is always looked at once,
+so adding one is never a silent no-op.
+
+Polling runs eight devices at a time (`poll_at_once`), so a fleet that
+discovery grew does not spend one device's timeout after another.
+
+Running this as part of the [IT Ops Console](https://github.com/JonathanT10/it-ops-console)?
+You can fill in the places to look on its **Print fleet** tab instead of
+editing this file, and it will show what each one found.
+
 ## What gets collected
 
 | Field | OID | Source |
@@ -74,9 +120,8 @@ Status rolls up to four states: **OK**, **Warning** (low paper/toner, or any sup
 
 ## Roadmap
 
-- Low-toner / offline alerts (email, Teams webhook)
-- Subnet auto-discovery
 - SNMPv3
+- Ping-first discovery, for ranges where most addresses are empty
 - Per-device cost tracking (price per cartridge → cost per page)
 
 ## Related tools

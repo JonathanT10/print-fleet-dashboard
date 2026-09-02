@@ -50,15 +50,34 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Columns added after the first release. A database made by an older version
+# is brought forward in place rather than rebuilt, so nobody loses history.
+LATER_COLUMNS = (
+    ("devices", "discovered_from", "TEXT"),   # the [ranges] entry that found it
+    ("devices", "discovered_utc",  "TEXT"),   # when a scan first saw it
+)
+
+
 def connect(path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    for table, column, kind in LATER_COLUMNS:
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(%s)" % table)}
+        if column not in have:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, kind))
+    conn.commit()
     return conn
 
 
-def upsert_device(conn, ip, name=None, model=None, serial=None, ts=None):
-    """Insert the device if new, refresh identity fields + last_seen if known."""
+def upsert_device(conn, ip, name=None, model=None, serial=None, ts=None,
+                  discovered_from=None):
+    """Insert the device if new, refresh identity fields + last_seen if known.
+
+    `discovered_from` names the [ranges] entry a scan found it through, and is
+    only ever set once - a printer you later name by hand in [devices] keeps
+    the record of where it came from.
+    """
     ts = ts or utcnow_iso()
     row = conn.execute("SELECT id FROM devices WHERE ip = ?", (ip,)).fetchone()
     if row:
@@ -73,9 +92,10 @@ def upsert_device(conn, ip, name=None, model=None, serial=None, ts=None):
         )
         return row["id"]
     cur = conn.execute(
-        "INSERT INTO devices (ip, name, model, serial, first_seen, last_seen)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (ip, name, model, serial, ts, ts),
+        "INSERT INTO devices (ip, name, model, serial, first_seen, last_seen,"
+        " discovered_from, discovered_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ip, name, model, serial, ts, ts, discovered_from,
+         ts if discovered_from else None),
     )
     return cur.lastrowid
 
