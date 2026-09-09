@@ -123,6 +123,11 @@ def run_collector(config, db, extra=()):
     argv = sys.argv
     sys.argv = ["collector.py", "--config", config, "--db", db] + list(extra)
     real_probe, real_poll = collector.probe_address, collector.snmp_poll
+    # These tests fake the network, so they must not also need the real SNMP
+    # library present to run - the up-front check in main() would otherwise
+    # make the whole suite depend on pysnmp being installed on the machine.
+    real_require = collector.require_snmp
+    collector.require_snmp = lambda: True
 
     async def fake_poll(host, port, *a, **k):
         dev = FLEET.get(host)
@@ -140,6 +145,7 @@ def run_collector(config, db, extra=()):
         buf.write("EXIT: %s\n" % e)
     finally:
         collector.probe_address, collector.snmp_poll = real_probe, real_poll
+        collector.require_snmp = real_require
         sys.argv = argv
     return buf.getvalue()
 
