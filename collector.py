@@ -6,6 +6,11 @@ Run it on a schedule (cron / Task Scheduler); each run appends one snapshot per
 device. Unreachable devices are recorded too, so the dashboard can show them
 as offline. Requires: pip install "pysnmp>=7.1"
 
+A printer that does not answer and a missing SNMP library are DIFFERENT facts
+and never produce the same words. If the library is not there, nothing is
+polled, nothing is written, no device is marked offline, and the exit code is
+non-zero so whatever ran this knows the fleet was not checked at all.
+
 Config (INI):
 
     [snmp]
@@ -45,6 +50,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from types import SimpleNamespace
 
 import fleetdb
 import iprange
@@ -85,24 +91,83 @@ SUPPLY_TYPES = {3: "toner", 4: "waste-toner", 5: "ink", 6: "ink-cartridge",
 # SNMP (pysnmp >= 7, asyncio hlapi)
 # --------------------------------------------------------------------------- #
 
-async def snmp_poll(host: str, port: int, community: str, timeout: float, retries: int,
-                    mp_model: int = 1):
-    """Return (fields dict, supplies list). Raises on unreachable/timeout."""
+# Exit code for "the SNMP library is not usable here". Distinct from 1 so a
+# caller can tell "the fleet was not checked" from any other failure.
+SNMP_MISSING_EXIT = 3
+
+
+def import_snmp():
+    """THE one place pysnmp is imported, so the pre-flight and the real work
+    ask exactly the same question.
+
+    This suite has already been bitten once by a pre-flight that asked a
+    DIFFERENT question than the operation it was guarding: a certificate check
+    that took a key handle, said "usable", and then watched the real sign-in
+    fail. A check that can disagree with the work is worse than no check,
+    because it reports fine on the machine where the thing then breaks. So
+    require_snmp() calls this, snmp_poll() calls this, probe_address() calls
+    this, and there is nothing left for them to disagree about.
+    """
     from pysnmp.hlapi.v3arch.asyncio import (
         SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
         ObjectType, ObjectIdentity, get_cmd, walk_cmd,
     )
+    return SimpleNamespace(
+        SnmpEngine=SnmpEngine, CommunityData=CommunityData,
+        UdpTransportTarget=UdpTransportTarget, ContextData=ContextData,
+        ObjectType=ObjectType, ObjectIdentity=ObjectIdentity,
+        get_cmd=get_cmd, walk_cmd=walk_cmd)
 
-    engine = SnmpEngine()
-    auth = CommunityData(community, mpModel=mp_model)  # 0 = SNMPv1, 1 = SNMPv2c
-    transport = await UdpTransportTarget.create((host, port),
-                                                timeout=timeout, retries=retries)
+
+def snmp_missing_words(error):
+    """What to tell a person who is not going to know what pysnmp is."""
+    return "\n".join([
+        "",
+        "  The printer checker needs a piece of Python called pysnmp, and the",
+        "  account that ran this cannot see it (%s)." % error,
+        "",
+        "  NOTHING WAS CHANGED. No printer was contacted, nothing was written",
+        "  down, and no printer has been marked offline - the printer page still",
+        "  shows the last real reading, marked as not updated by this run.",
+        "",
+        "  Install it for the WHOLE COMPUTER, not just for one person. The daily",
+        "  refresh runs as the computer itself, which cannot see a library that",
+        "  was installed for a single account - that is the usual cause of this.",
+        "  In a PowerShell window opened with 'Run as administrator':",
+        "",
+        '      & "%s" -m pip install "pysnmp>=7.1"' % sys.executable,
+        "",
+    ])
+
+
+def require_snmp():
+    """Ask the library question ONCE, up front, before anything is polled or
+    written. Returns True, or prints plain words and returns False."""
+    try:
+        import_snmp()
+    except ImportError as e:
+        print("[x] The printers could not be checked.")
+        print(snmp_missing_words(e))
+        return False
+    return True
+
+
+async def snmp_poll(host: str, port: int, community: str, timeout: float, retries: int,
+                    mp_model: int = 1):
+    """Return (fields dict, supplies list). Raises on unreachable/timeout."""
+    snmp = import_snmp()
+    ObjectType, ObjectIdentity = snmp.ObjectType, snmp.ObjectIdentity
+
+    engine = snmp.SnmpEngine()
+    auth = snmp.CommunityData(community, mpModel=mp_model)  # 0 = SNMPv1, 1 = v2c
+    transport = await snmp.UdpTransportTarget.create((host, port),
+                                                     timeout=timeout, retries=retries)
     try:
         # -- scalars (one GET; tolerate per-OID noSuchObject) --
         oids = [OID_UPTIME, OID_SYSNAME, OID_MODEL, OID_SERIAL,
                 OID_PRT_STATUS, OID_ERR_STATE, OID_LIFE_COUNT]
-        err_ind, err_stat, _, var_binds = await get_cmd(
-            engine, auth, transport, ContextData(),
+        err_ind, err_stat, _, var_binds = await snmp.get_cmd(
+            engine, auth, transport, snmp.ContextData(),
             *[ObjectType(ObjectIdentity(o)) for o in oids],
         )
         if err_ind:
@@ -121,8 +186,8 @@ async def snmp_poll(host: str, port: int, community: str, timeout: float, retrie
         # -- supplies (walk four columns) --
         async def walk(base):
             out = {}
-            objects = walk_cmd(engine, auth, transport, ContextData(),
-                               ObjectType(ObjectIdentity(base)))
+            objects = snmp.walk_cmd(engine, auth, transport, snmp.ContextData(),
+                                    ObjectType(ObjectIdentity(base)))
             async for w_err_ind, w_err_stat, _, w_binds in objects:
                 if w_err_ind or w_err_stat:
                     break
@@ -252,16 +317,15 @@ async def poll_many(devices, community, timeout, retries, mp_model, deadline, at
 # switch or a server that happens to speak SNMP is passed over, not recorded.
 async def probe_address(host, port, community, timeout, mp_model=1):
     """Return None (nothing answered) or {'printer': bool, 'sysname', 'model'}."""
-    from pysnmp.hlapi.v3arch.asyncio import (
-        SnmpEngine, CommunityData, UdpTransportTarget, ContextData,
-        ObjectType, ObjectIdentity, get_cmd,
-    )
-    engine = SnmpEngine()
-    auth = CommunityData(community, mpModel=mp_model)
-    transport = await UdpTransportTarget.create((host, port), timeout=timeout, retries=0)
+    snmp = import_snmp()
+    ObjectType, ObjectIdentity = snmp.ObjectType, snmp.ObjectIdentity
+    engine = snmp.SnmpEngine()
+    auth = snmp.CommunityData(community, mpModel=mp_model)
+    transport = await snmp.UdpTransportTarget.create((host, port), timeout=timeout,
+                                                     retries=0)
     try:
-        err_ind, err_stat, _idx, binds = await get_cmd(
-            engine, auth, transport, ContextData(),
+        err_ind, err_stat, _idx, binds = await snmp.get_cmd(
+            engine, auth, transport, snmp.ContextData(),
             ObjectType(ObjectIdentity(OID_SYSNAME)),
             ObjectType(ObjectIdentity(OID_MODEL)),
             ObjectType(ObjectIdentity(OID_PRT_STATUS)),
@@ -439,6 +503,13 @@ def main():
     if not devices and not places:
         sys.exit("Nothing to do: list printers under [devices], or places to look under [ranges].")
 
+    # Ask the library question BEFORE the database is opened, before anything is
+    # polled, and before a single row is written. A missing library means we
+    # learned nothing about any printer - and a run that learned nothing must
+    # not leave evidence behind that looks like something it learned.
+    if not require_snmp():
+        sys.exit(SNMP_MISSING_EXIT)
+
     conn = fleetdb.connect(args.db)
     ts = fleetdb.utcnow_iso()
     disc_path = discovery_path(args.db)
@@ -453,9 +524,18 @@ def main():
             due, why = True, "you asked for it"
         if due:
             print(f"Looking for printers ({why}).")
-            per_range, problems, found_new, non_printers = run_discovery(
-                conn, places, community, probe_timeout, mp_model, ignore,
-                max_addresses, scan_at_once, ts)
+            try:
+                per_range, problems, found_new, non_printers = run_discovery(
+                    conn, places, community, probe_timeout, mp_model, ignore,
+                    max_addresses, scan_at_once, ts)
+            except ImportError as e:
+                # Not "we looked and found nothing" - we never looked. Saying
+                # "Found 0 new printer(s)" here would be the same lie the poll
+                # used to tell, in the one place a person is least able to
+                # catch it: an empty range looks exactly like a quiet one.
+                print("[x] The search for new printers could not run.")
+                print(snmp_missing_words(e))
+                sys.exit(SNMP_MISSING_EXIT)
             scanned = True
             print(f"Found {len(found_new)} new printer(s).")
         else:
@@ -487,7 +567,7 @@ def main():
             devices.setdefault(row["name"] or row["ip"], row["ip"])
     poll_list = [(n, a.strip()) for n, a in devices.items() if a.strip() not in ignore]
 
-    ok = fail = 0
+    ok = fail = broke = 0
     if poll_list:
         results = asyncio.run(poll_many(poll_list, community, timeout, retries, mp_model,
                                         device_timeout, at_once))
@@ -500,6 +580,15 @@ def main():
                                         uptime_s, pages, supplies)
                 print(f"[+] {name} ({ip}): {status} - {detail}")
                 ok += 1
+            elif isinstance(error, ImportError):
+                # The SNMP library went missing part-way (require_snmp passed,
+                # so this means one of pysnmp's own optional imports failed).
+                # Record NOTHING. An invented "offline" row outlives the run:
+                # it lands in the history, drags the dashboard's online count
+                # down, and puts "check the printer is powered on" in front of
+                # somebody about a printer that was never asked anything.
+                print(f"[x] {name} ({ip}): could not be checked - {error}")
+                broke += 1
             else:
                 row = conn.execute("SELECT id FROM devices WHERE ip = ?", (ip,)).fetchone()
                 if row:
@@ -534,6 +623,12 @@ def main():
             "NonPrinters": non_printers if scanned else previous.get("NonPrinters", 0),
             "Problems": problems,
         })
+
+    if broke:
+        print(f"[x] Stopped: {broke} printer(s) could not be checked because the SNMP")
+        print("    library failed while the run was going. Nothing was recorded for")
+        print("    them - they have NOT been marked offline.")
+        sys.exit(SNMP_MISSING_EXIT)
 
     print(f"Done: {ok} polled, {fail} unreachable. Next: python dashboard.py --db {args.db}")
 
